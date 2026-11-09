@@ -13,6 +13,7 @@ struct SettingsView: View {
     var body: some View {
         TabView {
             PresetsSettings(store: store).tabItem { Text("预设") }
+            ScenesSettings(store: store).tabItem { Text("场景") }
             GeneralSettings(store: store).tabItem { Text("通用") }
         }
         .padding()
@@ -77,6 +78,148 @@ struct PresetsSettings: View {
         guard let id = selection, store.config.presets.count > 1 else { return }
         store.config.presets.removeAll { $0.id == id }
         selection = store.config.presets.first?.id
+    }
+}
+
+struct ScenesSettings: View {
+    @ObservedObject var store: ConfigStore
+    @State private var selection: UUID?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    List(selection: $selection) {
+                        ForEach(store.config.scenes) { scene in
+                            Text(scene.name).tag(scene.id)
+                        }
+                        .onMove { store.config.scenes.move(fromOffsets: $0, toOffset: $1) }
+                    }
+                    HStack(spacing: 4) {
+                        Button { addScene() } label: { Image(systemName: "plus") }
+                        Button { deleteSelected() } label: { Image(systemName: "minus") }
+                            .disabled(selection == nil)
+                        Spacer()
+                        Button("恢复默认场景") { restoreDefaults() }
+                            .font(.caption)
+                    }
+                    Text("从上往下匹配：先按 App，再按窗口标题/网址。都不匹配时为「通用」，不加任何场景要求。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                .frame(width: 240)
+
+                if let id = selection, store.config.scenes.contains(where: { $0.id == id }) {
+                    SceneEditor(scene: binding(for: id), presets: store.config.presets)
+                        .id(id)
+                } else {
+                    Text("选择左侧的一个场景").foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            Text("最近一次检测：\(store.lastDetection ?? "还没有打开过浮窗")")
+                .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+        }
+        .onAppear { if selection == nil { selection = store.config.scenes.first?.id } }
+    }
+
+    private func binding(for id: UUID) -> Binding<Scene> {
+        Binding(
+            get: { store.config.scenes.first { $0.id == id } ?? Scene(name: "") },
+            set: { newValue in
+                if let i = store.config.scenes.firstIndex(where: { $0.id == id }) { store.config.scenes[i] = newValue }
+            })
+    }
+
+    private func addScene() {
+        let scene = Scene(name: "新场景", guidance: "- Describe the tone and formatting the destination expects.")
+        store.config.scenes.append(scene)
+        selection = scene.id
+    }
+
+    private func deleteSelected() {
+        guard let id = selection else { return }
+        store.config.scenes.removeAll { $0.id == id }
+        selection = store.config.scenes.first?.id
+    }
+
+    private func restoreDefaults() {
+        store.config.scenes = Scene.defaults
+        selection = store.config.scenes.first?.id
+    }
+}
+
+struct SceneEditor: View {
+    @Binding var scene: Scene
+    let presets: [Preset]
+    @State private var bundleText = ""
+    @State private var keywordText = ""
+
+    var body: some View {
+        Form {
+            TextField("名称", text: $scene.name)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("匹配的 App（bundle ID，每行一个，末尾 * 表示前缀）")
+                    Spacer()
+                    Menu("添加正在运行的 App") {
+                        ForEach(runningApps, id: \.1) { name, id in
+                            Button("\(name)  (\(id))") { addBundle(id) }
+                        }
+                    }
+                    .fixedSize()
+                }
+                TextEditor(text: $bundleText)
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(height: 90)
+                    .onChange(of: bundleText) { _, v in scene.bundleIDs = lines(v) }
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("窗口标题或网址包含（每行一个，用于浏览器里的网页应用，如 docs.google.com）")
+                TextEditor(text: $keywordText)
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(height: 70)
+                    .onChange(of: keywordText) { _, v in scene.keywords = lines(v) }
+            }
+            Picker("打开时的预设", selection: $scene.defaultPresetID) {
+                Text("沿用该场景上次用的预设").tag(UUID?.none)
+                ForEach(presets) { p in Text(p.name).tag(UUID?.some(p.id)) }
+            }
+            Toggle("允许附带 Claude Code 会话上下文", isOn: $scene.allowContext)
+            Picker("粘贴前的格式处理", selection: Binding(get: { scene.format }, set: { scene.outputFormat = $0 })) {
+                ForEach(OutputFormat.allCases, id: \.self) { Text($0.label).tag($0) }
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("场景要求（语气、格式）")
+                Text("追加在预设 prompt 之后，告诉模型结果要粘贴到哪里、应该是什么风格。")
+                    .font(.caption).foregroundStyle(.secondary)
+                TextEditor(text: $scene.guidance)
+                    .font(.system(size: 12, design: .monospaced))
+                    .frame(minHeight: 140)
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear {
+            bundleText = scene.bundleIDs.joined(separator: "\n")
+            keywordText = scene.keywords.joined(separator: "\n")
+        }
+    }
+
+    private var runningApps: [(String, String)] {
+        NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+            .compactMap { app in app.bundleIdentifier.map { (app.localizedName ?? $0, $0) } }
+            .sorted { $0.0.localizedCaseInsensitiveCompare($1.0) == .orderedAscending }
+    }
+
+    private func addBundle(_ id: String) {
+        guard !scene.bundleIDs.contains(id) else { return }
+        bundleText = (lines(bundleText) + [id]).joined(separator: "\n")
+    }
+
+    private func lines(_ text: String) -> [String] {
+        text.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
     }
 }
 

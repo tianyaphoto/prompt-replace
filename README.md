@@ -19,6 +19,7 @@ macOS 菜单栏小工具：在任何 App 里按快捷键弹出浮窗，输入文
 | 打开浮窗（沿用上次的预设） | ⌃⌘Space |
 | 用指定预设打开 | ⌃⌥E 翻译成英文 · ⌃⌥R 精炼为 agent 指令 · ⌃⌥P 润色英文 · ⌃⌥C 翻译成中文 |
 | 开关会话上下文 | ⌘K |
+| 切换场景 | 点击浮窗右上角「场景」 |
 | 执行 / 结果就绪后粘贴 | ⌘↩ |
 | 粘贴（输入框没有焦点时） | ↩ |
 | 只复制不粘贴 | ⇧⌘C |
@@ -31,10 +32,31 @@ macOS 菜单栏小工具：在任何 App 里按快捷键弹出浮窗，输入文
 - 执行时用的是中文输入法友好的 ⌘↩，单独的 ↩ 留给输入法确认候选词和换行。
 - 点击浮窗外面会关闭浮窗，草稿会保留。
 
+## 场景感知
+
+同一个预设（比如「翻译成英文」）在不同地方用，应该有不同的写法：发给 Claude Code 要用直接的祈使句，Slack 要口语、简短，邮件要礼貌，Google Docs 不能出现 markdown 符号。打开浮窗时，App 会自动识别你刚才在哪里输入：
+
+1. **App 的 bundle ID**：Slack 桌面版、邮件、Pages、各种终端和 IDE。
+2. **窗口标题或网页地址**：浏览器里的网页应用，比如 `docs.google.com`、`mail.google.com`、`app.slack.com`。
+3. **都没匹配上**：归为「通用」，不加任何场景要求。浮窗右上角的「场景」菜单可以手动切换。
+
+| 默认场景 | 语气 / 格式 | 粘贴前处理 | 会话上下文 |
+| --- | --- | --- | --- |
+| AI 编程 / 终端 | 直接、祈使句，可以用 markdown | 保持原样 | 允许 |
+| Slack / 即时通讯 | 口语、简短，保留 @ 和 emoji | 转成 Slack 格式（`**粗体**` → `*粗体*`） | 不带 |
+| 邮件 | 礼貌、专业，不凭空添加问候语和签名 | 去掉 markdown 符号 | 不带 |
+| 文档 | 书面、完整的句子 | 去掉 markdown 符号 | 不带 |
+
+- 场景的语气和格式要求会追加在预设 prompt 后面；「粘贴前处理」由代码完成，不依赖模型是否听话。
+- 每个场景会记住你上次用的预设，也可以固定一个默认预设。
+- 在 设置 → 场景 里可以增删场景、编辑规则；「添加正在运行的 App」可以直接拿到 bundle ID。设置页底部会显示最近一次检测到的 App、标题和网址，规则不生效时可以对照着改。
+- 命令行诊断：`PromptReplace --detect 5`，5 秒后会打印前台 App 的检测结果。
+
 ## 会话上下文（精炼为 agent 指令）
 
 目的：节省 Claude Code 的订阅额度。额度大多不是花在你那句话上，而是花在 agent 因为指令含糊而做的搜索、猜测和返工上。「精炼为 agent 指令」预设会读取最近的 Claude Code 会话，把「刚才那个函数」「上面的问题」这类说法换成会话里出现过的具体文件名、函数名、报错信息，让 agent 第一次就做对。
 
+- 只在允许上下文的场景（默认只有「AI 编程 / 终端」）里自动开启；在其他场景按 ⌘K 可以强制打开。
 - 自动选用 `~/.claude/projects/` 下最近被写入的会话（默认 120 分钟内）。浮窗右上角会显示用的是哪个项目的会话、预计附带多少 token。
 - 只附带你和 Claude 的对话文字，以及一行行工具调用摘要（比如 `(tool: Read src/api.ts)`）。工具输出、思考过程、技能注入的内容都会丢掉，遇到 `/clear` 或 `/compact` 时，之前的内容也会丢掉。默认最多 12,000 字符，约 4k–6k token。
 - 这些调用和 Claude Code 共用同一份订阅额度，所以默认用 haiku + effort low。只有勾选了「附带上下文」的预设才会读取会话。
@@ -52,6 +74,8 @@ macOS 菜单栏小工具：在任何 App 里按快捷键弹出浮窗，输入文
 ```bash
 swift test
 "build/Prompt Replace.app/Contents/MacOS/PromptReplace" --run "帮我把这个函数改成异步的" [预设序号]
+SCENE=邮件 "build/Prompt Replace.app/Contents/MacOS/PromptReplace" --run "草稿" 0   # 指定场景
+"build/Prompt Replace.app/Contents/MacOS/PromptReplace" --detect 5   # 5 秒后检测前台 App 的场景
 SHOW_CONTEXT=1 "build/Prompt Replace.app/Contents/MacOS/PromptReplace" --run "把刚才那个问题修一下" 1   # 同时打印附带的上下文
 ```
 

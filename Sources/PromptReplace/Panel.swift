@@ -24,10 +24,17 @@ final class PanelModel: ObservableObject {
     @Published var useContext = false
     @Published var context: SessionContext?
     @Published var contextLoading = false
+    /// Destination scene (nil = 通用, no scene matched).
+    @Published var scene: Scene?
+    @Published var target: AppTarget?
+    @Published var lastRunSceneKey: String?
     weak var textView: NSTextView?
+
+    var sceneKey: String { scene?.id.uuidString ?? "general" }
 
     var isStale: Bool {
         lastRunInput != input || lastRunPresetID != presetID || lastRunUsedContext != useContext
+            || lastRunSceneKey != sceneKey
     }
     var canPaste: Bool {
         state == .done && !isStale && !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -41,6 +48,7 @@ final class PanelModel: ObservableObject {
         lastRunInput = nil
         lastRunPresetID = nil
         lastRunUsedContext = nil
+        lastRunSceneKey = nil
     }
 }
 
@@ -92,7 +100,8 @@ final class PanelController: NSObject, NSWindowDelegate {
                 self?.close(restoreFocus: false)
                 self?.openSettings()
             },
-            onToggleContext: { [weak self] in self?.toggleContext() })
+            onToggleContext: { [weak self] in self?.toggleContext() },
+            onSelectScene: { [weak self] id in self?.selectScene(id) })
         let effect = NSVisualEffectView()
         effect.material = .popover
         effect.blendingMode = .behindWindow
@@ -130,6 +139,14 @@ final class PanelController: NSObject, NSWindowDelegate {
         }
         model.targetAppName = previousApp?.localizedName
 
+        // Which destination is this? (bundle ID, then window title / page URL)
+        let target = SceneDetector.target(for: previousApp)
+        let detected = SceneMatcher.match(target, scenes: store.config.scenes)
+        let sceneChanged = detected?.id != model.scene?.id
+        model.target = target
+        model.scene = detected
+        store.lastDetection = target.summary + "  →  " + (detected?.name ?? "通用（未匹配场景）")
+
         // Must read the selection before we steal focus.
         var prefilled = false
         if store.config.prefillSelection, let selection = Paster.selectedText() {
@@ -138,11 +155,14 @@ final class PanelController: NSObject, NSWindowDelegate {
             prefilled = true
         }
 
-        let wanted = presetID ?? store.config.lastPresetID
+        let wanted = presetID
+            ?? detected?.defaultPresetID
+            ?? store.config.lastPresetByScene[model.sceneKey]
+            ?? store.config.lastPresetID
         let newPresetID = store.config.presets.contains { $0.id == wanted } ? wanted : store.config.presets.first?.id
-        if newPresetID != model.presetID || model.lastRunPresetID == nil {
+        if newPresetID != model.presetID || model.lastRunPresetID == nil || sceneChanged {
             model.presetID = newPresetID
-            model.useContext = currentPreset?.includeContext ?? false
+            model.useContext = defaultUseContext
         }
         model.notice = nil
         reloadContext()
@@ -284,10 +304,23 @@ final class PanelController: NSObject, NSWindowDelegate {
         rerunIfHadResult()
     }
 
+    /// Context is on when the preset wants it and the destination makes sense for Claude Code context.
+    private var defaultUseContext: Bool {
+        (currentPreset?.includeContext ?? false) && (model.scene?.allowContext ?? false)
+    }
+
     func selectPreset(_ id: UUID) {
         guard id != model.presetID else { return }
         model.presetID = id
-        model.useContext = currentPreset?.includeContext ?? false
+        model.useContext = defaultUseContext
+        rerunIfHadResult()
+    }
+
+    /// Manual scene override from the panel (nil = 通用).
+    func selectScene(_ id: UUID?) {
+        guard id != model.scene?.id else { return }
+        model.scene = store.config.scenes.first { $0.id == id }
+        model.useContext = defaultUseContext
         rerunIfHadResult()
     }
 
@@ -318,11 +351,16 @@ final class PanelController: NSObject, NSWindowDelegate {
         model.lastRunInput = model.input
         model.lastRunPresetID = preset.id
         model.lastRunUsedContext = model.useContext
-        store.config.lastPresetID = preset.id
+        model.lastRunSceneKey = model.sceneKey
+        var updated = store.config
+        updated.lastPresetID = preset.id
+        updated.lastPresetByScene[model.sceneKey] = preset.id
+        store.config = updated
 
         var cfg = store.config
         var userMessage = text
         var systemPrompt = preset.prompt
+        if let scene = model.scene { systemPrompt += Scene.promptAddendum(scene) }
         if model.useContext {
             if let context = model.context {
                 userMessage = ContextPrompt.userMessage(draft: text, context: context)
@@ -359,7 +397,7 @@ final class PanelController: NSObject, NSWindowDelegate {
     private func finishRun(_ result: Result<String, Error>, autoPaste: Bool) {
         switch result {
         case .success(let text):
-            model.output = text
+            model.output = OutputFormatter.apply(model.scene?.format ?? .keep, to: text)
             model.state = .done
             // Move focus off the editor so a plain ↩ pastes.
             if panel.firstResponder === model.textView { panel.makeFirstResponder(nil) }
@@ -416,6 +454,7 @@ struct PanelView: View {
     var onPrimary: () -> Void
     var onSettings: () -> Void
     var onToggleContext: () -> Void
+    var onSelectScene: (UUID?) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -468,6 +507,7 @@ struct PanelView: View {
                     }
                 }
             }
+            sceneChip
             contextChip
             Button(action: onSettings) { Image(systemName: "gearshape") }
                 .buttonStyle(.plain)
@@ -477,6 +517,25 @@ struct PanelView: View {
         .padding(.horizontal, 12)
         .padding(.top, 12)
         .padding(.bottom, 8)
+    }
+
+    private var sceneChip: some View {
+        Menu {
+            ForEach(store.config.scenes) { scene in
+                Button { onSelectScene(scene.id) } label: {
+                    if scene.id == model.scene?.id { Label(scene.name, systemImage: "checkmark") } else { Text(scene.name) }
+                }
+            }
+            Divider()
+            Button { onSelectScene(nil) } label: {
+                if model.scene == nil { Label("通用（不加场景要求）", systemImage: "checkmark") } else { Text("通用（不加场景要求）") }
+            }
+        } label: {
+            Text("场景：\(model.scene?.name ?? "通用")").font(.caption)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("检测到：\(model.target?.summary ?? "未知")\n规则在 设置 → 场景 里修改")
     }
 
     private var contextLabel: String {

@@ -113,3 +113,87 @@ final class TranscriptParserTests: XCTestCase {
         XCTAssertEqual(again.presets.count, 2)
     }
 }
+
+final class SceneTests: XCTestCase {
+    private let scenes = Scene.defaults
+    private func name(_ t: AppTarget) -> String? { SceneMatcher.match(t, scenes: scenes)?.name }
+
+    func testBundleMatching() {
+        XCTAssertEqual(name(AppTarget(bundleID: "com.mitchellh.ghostty")), "AI 编程 / 终端")
+        XCTAssertEqual(name(AppTarget(bundleID: "com.tinyspeck.slackmacgap")), "Slack / 即时通讯")
+        XCTAssertEqual(name(AppTarget(bundleID: "com.apple.mail")), "邮件")
+        XCTAssertEqual(name(AppTarget(bundleID: "COM.APPLE.IWORK.PAGES")), "文档")
+    }
+
+    func testWildcardBundle() {
+        XCTAssertEqual(name(AppTarget(bundleID: "com.jetbrains.intellij")), "AI 编程 / 终端")
+    }
+
+    func testBrowserWebAppsByURLOrTitle() {
+        XCTAssertEqual(name(AppTarget(bundleID: "com.google.Chrome", url: "https://docs.google.com/document/d/abc/edit")), "文档")
+        XCTAssertEqual(name(AppTarget(bundleID: "com.google.Chrome", windowTitle: "Q3 plan - Google Docs")), "文档")
+        XCTAssertEqual(name(AppTarget(bundleID: "com.apple.Safari", url: "https://mail.google.com/mail/u/0/#inbox")), "邮件")
+        XCTAssertEqual(name(AppTarget(bundleID: "com.google.Chrome", windowTitle: "general (Channel) - Acme - Slack")), "Slack / 即时通讯")
+    }
+
+    func testTitleMentioningSlackInsideADocIsADoc() {
+        XCTAssertEqual(name(AppTarget(bundleID: "com.google.Chrome", windowTitle: "Slack onboarding notes - Google Docs")), "文档")
+    }
+
+    func testAppIdentityBeatsTitle() {
+        // A terminal tab titled like a Gmail page is still the terminal.
+        XCTAssertEqual(name(AppTarget(bundleID: "com.googlecode.iterm2", windowTitle: "debug - Gmail")), "AI 编程 / 终端")
+    }
+
+    func testUnknownFallsBackToGeneral() {
+        XCTAssertNil(name(AppTarget(bundleID: "com.google.Chrome", windowTitle: "Hacker News")))
+        XCTAssertNil(name(AppTarget()))
+    }
+
+    func testOnlyAgentSceneAllowsContextByDefault() {
+        XCTAssertEqual(scenes.filter(\.allowContext).map(\.name), ["AI 编程 / 终端"])
+    }
+
+    func testAddendum() {
+        XCTAssertEqual(Scene.promptAddendum(Scene(name: "x", guidance: "  ")), "")
+        XCTAssertTrue(Scene.promptAddendum(scenes[2]).contains("pasted into 邮件"))
+    }
+
+    func testV2ConfigMigratesToV3() throws {
+        let v2 = AppConfig(presets: [
+            Preset(name: "翻译成英文", prompt: AppConfig.legacyTranslatePromptV1),
+            Preset(name: "自定义", prompt: "my own prompt"),
+        ], mainHotKey: nil, configVersion: 2)
+        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(v2)) as! [String: Any]
+        json.removeValue(forKey: "scenes")
+        json.removeValue(forKey: "lastPresetByScene")
+        let migrated = try JSONDecoder().decode(AppConfig.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertEqual(migrated.configVersion, AppConfig.currentVersion)
+        XCTAssertEqual(migrated.presets[0].prompt, AppConfig.defaultTranslatePrompt)
+        XCTAssertEqual(migrated.presets[1].prompt, "my own prompt")
+        XCTAssertEqual(migrated.scenes.map(\.name), Scene.defaults.map(\.name))
+        XCTAssertFalse(AppConfig.defaultTranslatePrompt.contains("coding agent"))
+    }
+}
+
+final class OutputFormatterTests: XCTestCase {
+    let md = "# Weekly update\n**This week**\n* Fixed `auth.ts`\n- See [docs](https://x.y)\n```\nlet a = 1\n```\n2 * 3 = 6"
+
+    func testPlainText() {
+        XCTAssertEqual(OutputFormatter.plainText(md),
+                       "Weekly update\nThis week\n- Fixed auth.ts\n- See docs (https://x.y)\nlet a = 1\n2 * 3 = 6")
+    }
+
+    func testSlack() {
+        XCTAssertEqual(OutputFormatter.slack("# Title\n**bold** and `code`\n[docs](https://x.y)"),
+                       "*Title*\n*bold* and `code`\n<https://x.y|docs>")
+    }
+
+    func testV3ScenesGetDefaultFormats() throws {
+        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(AppConfig.defaults)) as! [String: Any]
+        json["configVersion"] = 3
+        json["scenes"] = (json["scenes"] as! [[String: Any]]).map { var s = $0; s.removeValue(forKey: "outputFormat"); return s }
+        let c = try JSONDecoder().decode(AppConfig.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertEqual(c.scenes.map(\.format), [.keep, .slack, .plainText, .plainText])
+    }
+}
