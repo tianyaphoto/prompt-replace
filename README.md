@@ -54,3 +54,7 @@ swift test
 "build/Prompt Replace.app/Contents/MacOS/PromptReplace" --run "帮我把这个函数改成异步的" [预设序号]
 SHOW_CONTEXT=1 "build/Prompt Replace.app/Contents/MacOS/PromptReplace" --run "把刚才那个问题修一下" 1   # 同时打印附带的上下文
 ```
+
+## License
+
+[MIT](LICENSE)
